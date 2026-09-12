@@ -1,8 +1,9 @@
 """
-Buy or Wait? — Phase 1 + Phase 2
+Buy or Wait? — Phase 1 + Phase 2 + Phase 3
 
 Phase 1 loads the first request and prints a simple surplus.
 Phase 2 adds a deterministic 90-day forecast and a safer amount_safe_to_pay.
+Phase 3 chooses full payment, installments, partial payment, wait, or none.
 This still does not write output.csv.
 """
 
@@ -11,6 +12,7 @@ import sys
 
 import pandas as pd
 
+from decide import print_decision, recommend_plan, run_simple_decision_tests
 from forecast import parse_number, print_forecast_summary, run_forecast, run_simple_tests
 
 
@@ -24,6 +26,7 @@ CSV_PATHS = {
     "events": DATASET_DIR / "financial_events.csv",
     "sample_requests": DATASET_DIR / "sample_requests.csv",
     "exchange_rates": DATASET_DIR / "exchange_rates.csv",
+    "payment_options": DATASET_DIR / "request_payment_options.csv",
 }
 
 
@@ -109,6 +112,7 @@ def main() -> int:
 
     try:
         run_simple_tests()
+        run_simple_decision_tests()
         print()
 
         requests_df = load_csv(CSV_PATHS["requests"], "requests.csv")
@@ -120,17 +124,21 @@ def main() -> int:
         exchange_rates_df = load_csv(
             CSV_PATHS["exchange_rates"], "exchange_rates.csv", required=False
         )
+        payment_options_df = load_csv(
+            CSV_PATHS["payment_options"], "request_payment_options.csv"
+        )
 
         print_section(
             "Loaded CSV files",
             (
-                f"requests.csv          : {len(requests_df)} rows\n"
-                f"financial_profiles.csv: {len(profiles_df)} rows\n"
-                f"financial_events.csv  : {len(events_df)} rows\n"
-                f"sample_requests.csv   : {len(sample_requests_df)} rows "
+                f"requests.csv                 : {len(requests_df)} rows\n"
+                f"financial_profiles.csv       : {len(profiles_df)} rows\n"
+                f"financial_events.csv         : {len(events_df)} rows\n"
+                f"sample_requests.csv          : {len(sample_requests_df)} rows "
                 "(loaded for format check only)\n"
-                f"exchange_rates.csv    : {len(exchange_rates_df)} rows "
-                "(used only when an event currency differs from home_currency)"
+                f"exchange_rates.csv           : {len(exchange_rates_df)} rows "
+                "(used only when an event currency differs from home_currency)\n"
+                f"request_payment_options.csv  : {len(payment_options_df)} rows"
             ),
         )
 
@@ -203,9 +211,30 @@ def main() -> int:
             (
                 f"amount_safe_to_pay        : {forecast.amount_safe_to_pay}\n"
                 f"affordability_status      : {phase2_status}\n"
-                f"recommended_payment_method: {phase2_method}"
+                f"recommended_payment_method: {phase2_method}\n"
+                "Note: Phase 2 does not read payment options or user method limits."
             ),
         )
+
+        matching_options = payment_options_df[
+            payment_options_df["request_id"].astype(str) == str(first_request["request_id"])
+        ]
+        print_section(
+            f"Payment options for {first_request['request_id']}",
+            matching_options
+            if not matching_options.empty
+            else "No payment options found for this request.",
+        )
+
+        decision = recommend_plan(
+            first_request,
+            profile,
+            forecast,
+            payment_options_df,
+            matching_events,
+            exchange_rates_df,
+        )
+        print_decision(decision)
         return 0
 
     except FileNotFoundError as error:
@@ -218,7 +247,7 @@ def main() -> int:
         print(f"ERROR: Missing expected column {error}", file=sys.stderr)
         return 1
     except AssertionError as error:
-        print(f"ERROR: Phase 2 test failed: {error}", file=sys.stderr)
+        print(f"ERROR: Phase 2/3 test failed: {error}", file=sys.stderr)
         return 1
 
 

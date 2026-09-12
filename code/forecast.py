@@ -64,6 +64,7 @@ class ForecastResult:
     forecast_end: date
     notes: list[str] = field(default_factory=list)
     applied_event_count: int = 0
+    cash_events: list[CashEvent] = field(default_factory=list)
 
 
 def parse_date(value: Any) -> date | None:
@@ -336,15 +337,30 @@ def simulate_balances(
     forecast_end: date,
     cash_events: list[CashEvent],
     payment_on_request_date: float = 0.0,
+    extra_payments: list[tuple[date, float]] | None = None,
 ) -> tuple[float, date, float, float, int]:
     """
     Walk every date in the window.
 
-    Safer intra-day order: payment, then debits, then credits.
+    Safer intra-day order: planned payments, then other debits, then credits.
+    extra_payments lets Phase 3 test a full payment on a later day or a
+    multi-date installment / partial-payment schedule.
     """
+    payments_by_day: dict[date, float] = defaultdict(float)
+    if payment_on_request_date:
+        payments_by_day[request_date] += payment_on_request_date
+    if extra_payments:
+        for pay_date, amount in extra_payments:
+            if amount:
+                payments_by_day[pay_date] += amount
+
+    sim_end = forecast_end
+    if payments_by_day:
+        sim_end = max(sim_end, max(payments_by_day))
+
     by_day: dict[date, list[CashEvent]] = defaultdict(list)
     for event in cash_events:
-        if request_date <= event.cash_date <= forecast_end:
+        if request_date <= event.cash_date <= sim_end:
             by_day[event.cash_date].append(event)
 
     balance = starting_balance
@@ -353,14 +369,15 @@ def simulate_balances(
     income_total = 0.0
     applied = 0
 
-    if payment_on_request_date:
-        balance -= payment_on_request_date
-        if balance < lowest:
-            lowest = balance
-            lowest_date = request_date
-
     current = request_date
-    while current <= forecast_end:
+    while current <= sim_end:
+        today_payment = payments_by_day.get(current, 0.0)
+        # Paying today uses the current available balance, not later same-day income.
+        if today_payment and current == request_date:
+            balance -= today_payment
+            if balance < lowest:
+                lowest = balance
+                lowest_date = current
         day_events = by_day.get(current, [])
         debits = [event for event in day_events if event.direction == "debit"]
         credits = [event for event in day_events if event.direction == "credit"]
@@ -378,9 +395,39 @@ def simulate_balances(
             if balance < lowest:
                 lowest = balance
                 lowest_date = current
+        # A later planned payment can use that day's confirmed income.
+        if today_payment and current != request_date:
+            balance -= today_payment
+            if balance < lowest:
+                lowest = balance
+                lowest_date = current
         current += timedelta(days=1)
 
     return lowest, lowest_date, income_total, balance, applied
+
+
+def find_earliest_full_payment_date(
+    starting_balance: float,
+    minimum_balance: float,
+    requested_amount: float,
+    request_date: date,
+    forecast_end: date,
+    cash_events: list[CashEvent],
+) -> date | None:
+    """First date a single full payment stays at or above the minimum."""
+    current = request_date
+    while current <= forecast_end:
+        lowest, _, _, _, _ = simulate_balances(
+            starting_balance,
+            request_date,
+            forecast_end,
+            cash_events,
+            extra_payments=[(current, requested_amount)],
+        )
+        if lowest >= minimum_balance:
+            return current
+        current += timedelta(days=1)
+    return None
 
 
 def protected_expense_total(
@@ -519,6 +566,7 @@ def run_forecast(
         forecast_end=forecast_end,
         notes=notes,
         applied_event_count=applied,
+        cash_events=cash_events,
     )
 
 
