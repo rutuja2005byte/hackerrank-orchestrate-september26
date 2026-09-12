@@ -638,25 +638,6 @@ def recommend_plan(
     )
 
 
-def print_decision(decision: Decision) -> None:
-    print("=" * 80)
-    print("Phase 3 — recommended plan")
-    print("=" * 80)
-    print(f"request_id                     : {decision.request_id}")
-    print(f"amount_safe_to_pay             : {decision.amount_safe_to_pay}")
-    print(f"affordability_status           : {decision.affordability_status}")
-    print(f"recommended_payment_method     : {decision.recommended_payment_method}")
-    print(f"payment_plan                   : {decision.payment_plan}")
-    print(f"earliest_date_for_full_payment : {decision.earliest_date_for_full_payment}")
-    print(f"spending_changes_needed        : {decision.spending_changes_needed}")
-    print(f"decision_explanation           : {decision.decision_explanation}")
-    if decision.notes:
-        print("Notes:")
-        for note in decision.notes:
-            print(f"  - {note}")
-    print()
-
-
 def _empty_forecast(safe: float, requested: float, start: date, minimum: float, balance: float) -> ForecastResult:
     from datetime import timedelta
 

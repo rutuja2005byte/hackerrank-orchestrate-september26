@@ -27,7 +27,10 @@ CSV_PATHS = {
 }
 OUTPUT_PATH = DATASET_DIR / "output.csv"
 ROOT_OUTPUT_PATH = REPO_ROOT / "output.csv"
-USAGE_REPORT_PATH = REPO_ROOT / "code" / "evaluation" / "usage_report.md"
+USAGE_REPORT_PATHS = (
+    REPO_ROOT / "code" / "evaluation" / "usage_report.md",
+    REPO_ROOT / "code" / "usage_report.md",
+)
 
 
 def load_csv(path: Path, file_label: str, required: bool = True):
@@ -78,7 +81,8 @@ def main() -> int:
         usage.notes.append(
             "Full-dataset predictions are deterministic and did not call Gemini."
         )
-        write_usage_report(USAGE_REPORT_PATH, usage, request_count=len(rows))
+        for usage_path in USAGE_REPORT_PATHS:
+            write_usage_report(usage_path, usage, request_count=len(rows))
 
         summary = summarize_rows(rows)
         print()

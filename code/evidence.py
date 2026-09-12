@@ -285,50 +285,6 @@ def apply_extracted_facts(
     return patched, notes
 
 
-def print_evidence_summary(
-    messages_df: pd.DataFrame,
-    images_df: pd.DataFrame,
-    facts: list[dict[str, Any]],
-    apply_notes: list[str],
-    usage_notes: list[str],
-) -> None:
-    print("=" * 80)
-    print("Phase 4 — messages, images, and extracted facts")
-    print("=" * 80)
-    print(f"Relevant messages : {len(messages_df)}")
-    print(f"Relevant images   : {len(images_df)}")
-    if not messages_df.empty:
-        print("Messages:")
-        for _, row in messages_df.iterrows():
-            text = _blank_to_empty(row.get("message_text"))
-            if len(text) > 180:
-                text = text[:177] + "..."
-            print(
-                f"  - {row.get('message_id')} [{row.get('source_type')}] "
-                f"event={_blank_to_empty(row.get('related_event_id')) or 'none'}: {text}"
-            )
-    if not images_df.empty:
-        print("Images:")
-        for _, row in images_df.iterrows():
-            exists = "found" if row.get("image_exists") else "MISSING"
-            print(
-                f"  - {row.get('image_id')} -> {row.get('related_event_id')} ({exists})"
-            )
-    print(f"Extracted facts   : {len(facts)}")
-    for fact in facts:
-        print(
-            f"  - {fact.get('source_id')}: {fact.get('action')} "
-            f"amount={fact.get('amount')} date={fact.get('date') or 'none'} "
-            f"event={fact.get('related_event_id') or 'none'} "
-            f"pending={fact.get('is_pending')} confirmed={fact.get('is_confirmed')}"
-        )
-    if usage_notes or apply_notes:
-        print("Notes:")
-        for note in usage_notes + apply_notes:
-            print(f"  - {note}")
-    print()
-
-
 def run_simple_evidence_tests() -> None:
     """Deterministic application tests. These do not call Gemini."""
     events = pd.DataFrame(

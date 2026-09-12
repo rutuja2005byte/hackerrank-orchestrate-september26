@@ -823,28 +823,6 @@ def run_forecast(
     )
 
 
-def print_forecast_summary(result: ForecastResult) -> None:
-    """Print the short Phase 2 summary requested for the MVP."""
-    print("=" * 80)
-    print("Phase 2 — 90-day forecast summary")
-    print("=" * 80)
-    print(f"Forecast window            : {result.forecast_start} to {result.forecast_end}")
-    print(f"Starting balance           : {result.starting_balance}")
-    print(f"Total confirmed income     : {result.total_confirmed_income}")
-    print(f"Total protected expenses   : {result.total_protected_expenses}")
-    print(f"Lowest forecast balance    : {result.lowest_forecast_balance}")
-    print(f"Date of lowest balance     : {result.date_of_lowest_balance}")
-    print(f"Minimum balance required   : {result.minimum_balance_required}")
-    print(f"Forecast is safe           : {result.is_safe}")
-    print(f"amount_safe_to_pay         : {result.amount_safe_to_pay}")
-    print(f"Cash events applied        : {result.applied_event_count}")
-    if result.notes:
-        print("Notes:")
-        for note in result.notes:
-            print(f"  - {note}")
-    print()
-
-
 def _make_event_row(**values: Any) -> dict[str, Any]:
     """Helper used by the built-in tests to build one event dict."""
     template = {
