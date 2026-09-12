@@ -196,7 +196,7 @@ def classify_event_row(
     if amount is None:
         notes.append(
             f"{event_id}: amount is blank, so it is not treated as zero. "
-            "Image/OCR lookup is not part of Phase 2."
+            "Phase 4 fills it only when extracted evidence supplies an amount."
         )
         # Past blank amounts can still be ignored for history; future ones
         # cannot be applied until an amount is known.

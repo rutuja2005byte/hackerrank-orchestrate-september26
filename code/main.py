@@ -1,9 +1,10 @@
 """
-Buy or Wait? — Phase 1 + Phase 2 + Phase 3
+Buy or Wait? — Phase 1 to Phase 4
 
 Phase 1 loads the first request and prints a simple surplus.
 Phase 2 adds a deterministic 90-day forecast and a safer amount_safe_to_pay.
 Phase 3 chooses full payment, installments, partial payment, wait, or none.
+Phase 4 uses Gemini only to extract facts from messages and images.
 This still does not write output.csv.
 """
 
@@ -13,7 +14,23 @@ import sys
 import pandas as pd
 
 from decide import print_decision, recommend_plan, run_simple_decision_tests
+from evidence import (
+    apply_extracted_facts,
+    event_context_rows,
+    images_as_payload,
+    messages_as_payload,
+    print_evidence_summary,
+    run_simple_evidence_tests,
+    select_images,
+    select_messages,
+)
 from forecast import parse_number, print_forecast_summary, run_forecast, run_simple_tests
+from gemini_extract import (
+    UsageRecord,
+    extract_facts_with_gemini,
+    get_gemini_settings,
+    write_usage_report,
+)
 
 
 # <repo>/code/main.py -> <repo>/dataset
@@ -27,7 +44,11 @@ CSV_PATHS = {
     "sample_requests": DATASET_DIR / "sample_requests.csv",
     "exchange_rates": DATASET_DIR / "exchange_rates.csv",
     "payment_options": DATASET_DIR / "request_payment_options.csv",
+    "messages": DATASET_DIR / "messages.csv",
+    "images": DATASET_DIR / "images.csv",
 }
+IMAGE_DIR = DATASET_DIR / "media" / "images"
+USAGE_REPORT_PATH = REPO_ROOT / "code" / "evaluation" / "usage_report.md"
 
 
 def configure_pandas_display() -> None:
@@ -113,6 +134,7 @@ def main() -> int:
     try:
         run_simple_tests()
         run_simple_decision_tests()
+        run_simple_evidence_tests()
         print()
 
         requests_df = load_csv(CSV_PATHS["requests"], "requests.csv")
@@ -127,6 +149,8 @@ def main() -> int:
         payment_options_df = load_csv(
             CSV_PATHS["payment_options"], "request_payment_options.csv"
         )
+        messages_df = load_csv(CSV_PATHS["messages"], "messages.csv")
+        images_df = load_csv(CSV_PATHS["images"], "images.csv")
 
         print_section(
             "Loaded CSV files",
@@ -138,7 +162,9 @@ def main() -> int:
                 "(loaded for format check only)\n"
                 f"exchange_rates.csv           : {len(exchange_rates_df)} rows "
                 "(used only when an event currency differs from home_currency)\n"
-                f"request_payment_options.csv  : {len(payment_options_df)} rows"
+                f"request_payment_options.csv  : {len(payment_options_df)} rows\n"
+                f"messages.csv                 : {len(messages_df)} rows\n"
+                f"images.csv                   : {len(images_df)} rows"
             ),
         )
 
@@ -183,6 +209,44 @@ def main() -> int:
         phase1_status, phase1_method = temporary_decision(
             phase1_safe_amount, requested_amount
         )
+
+        relevant_messages = select_messages(messages_df, user_id, str(first_request["request_id"]))
+        relevant_images = select_images(
+            images_df,
+            user_id,
+            str(first_request["request_id"]),
+            set(matching_events["event_id"].astype(str)) if not matching_events.empty else set(),
+            IMAGE_DIR,
+        )
+        api_key, model_name = get_gemini_settings(REPO_ROOT)
+        usage = UsageRecord(model=model_name)
+        image_items, image_skip_notes = images_as_payload(relevant_images)
+        usage.notes.extend(image_skip_notes)
+        try:
+            facts = extract_facts_with_gemini(
+                messages_as_payload(relevant_messages),
+                image_items,
+                event_context_rows(matching_events),
+                api_key,
+                model_name,
+                usage,
+            )
+        except Exception as error:
+            usage.notes.append(f"Gemini extraction failed: {error}")
+            facts = []
+        matching_events, apply_notes = apply_extracted_facts(
+            matching_events,
+            facts,
+            str(profile.get("home_currency", "") or ""),
+        )
+        print_evidence_summary(
+            relevant_messages,
+            relevant_images,
+            facts,
+            apply_notes,
+            usage.notes,
+        )
+        write_usage_report(USAGE_REPORT_PATH, usage, request_count=1)
 
         print_section(
             "Phase 1 temporary safe amount and decision",
