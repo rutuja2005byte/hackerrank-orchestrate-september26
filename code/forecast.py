@@ -415,19 +415,40 @@ def find_earliest_full_payment_date(
     cash_events: list[CashEvent],
 ) -> date | None:
     """First date a single full payment stays at or above the minimum."""
-    current = request_date
-    while current <= forecast_end:
+    if requested_amount <= 0:
+        return request_date
+
+    def is_safe(pay_date: date) -> bool:
         lowest, _, _, _, _ = simulate_balances(
             starting_balance,
             request_date,
             forecast_end,
             cash_events,
-            extra_payments=[(current, requested_amount)],
+            extra_payments=[(pay_date, requested_amount)],
         )
-        if lowest >= minimum_balance:
-            return current
-        current += timedelta(days=1)
-    return None
+        return lowest >= minimum_balance
+
+    if is_safe(request_date):
+        return request_date
+
+    # Paying later never makes an already-safe date unsafe, so binary search.
+    low = 1
+    high = (forecast_end - request_date).days
+    found: date | None = None
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = request_date + timedelta(days=mid)
+        if is_safe(candidate):
+            found = candidate
+            high = mid - 1
+        else:
+            low = mid + 1
+    return found
+
+
+def round_money(amount: float) -> float:
+    """Keep money values to two decimals so CSV output stays stable."""
+    return round(float(amount) + 0.0, 2)
 
 
 def protected_expense_total(
@@ -500,7 +521,7 @@ def calculate_amount_safe_to_pay(
     )
     raw_safe = lowest - minimum_balance
     safe_amount = max(0.0, min(raw_safe, requested_amount))
-    return safe_amount, lowest, lowest_date
+    return round_money(safe_amount), lowest, lowest_date
 
 
 def run_forecast(

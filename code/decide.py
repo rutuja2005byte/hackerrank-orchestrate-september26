@@ -20,6 +20,7 @@ from forecast import (
     find_earliest_full_payment_date,
     optional_number,
     parse_date,
+    round_money,
     simulate_balances,
     split_categories,
 )
@@ -85,8 +86,8 @@ def optional_int(value: Any) -> int | None:
 
 
 def format_amount(amount: float) -> str:
-    """Match the sample style: whole numbers stay whole, else two decimals."""
-    rounded = round(amount, 2)
+    """Avoid float noise: integers stay integers, else two decimals."""
+    rounded = round_money(amount)
     if abs(rounded - round(rounded)) < 1e-9:
         return str(int(round(rounded)))
     return f"{rounded:.2f}"
@@ -380,7 +381,7 @@ def recommend_plan(
     if not plans:
         return Decision(
             request_id=request_id,
-            amount_safe_to_pay=forecast.amount_safe_to_pay,
+            amount_safe_to_pay=round_money(forecast.amount_safe_to_pay),
             affordability_status="not_affordable",
             recommended_payment_method="not_recommended",
             payment_plan="none",
@@ -394,7 +395,7 @@ def recommend_plan(
     status = status_for_method(best.method, best.start_date, forecast.forecast_start)
     return Decision(
         request_id=request_id,
-        amount_safe_to_pay=forecast.amount_safe_to_pay,
+        amount_safe_to_pay=round_money(forecast.amount_safe_to_pay),
         affordability_status=status,
         recommended_payment_method=best.method,
         payment_plan=format_payment_plan(best.payments),
