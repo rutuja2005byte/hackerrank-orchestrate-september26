@@ -2,7 +2,7 @@
 Phase 3 — choose a payment plan from the Phase 2 forecast.
 
 No LLM. Plans are scored with the ranking rules in problem_statement.md.
-Spending changes are not applied yet; those stay none in this phase.
+Spending changes are searched only when they unlock a better deadline plan.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from forecast import (
     optional_number,
     parse_date,
     round_money,
+    run_forecast,
     simulate_balances,
     split_categories,
 )
@@ -49,6 +50,8 @@ class CandidatePlan:
             self.start_date.toordinal(),
             len(self.payments),
             option_key,
+            0 if self.spending_changes == "none" else self.spending_changes.count("|") + 1,
+            self.spending_changes,
         )
 
 
@@ -91,6 +94,19 @@ def format_amount(amount: float) -> str:
     if abs(rounded - round(rounded)) < 1e-9:
         return str(int(round(rounded)))
     return f"{rounded:.2f}"
+
+
+def format_money_text(amount: float, currency: str) -> str:
+    rounded = round_money(amount)
+    if abs(rounded - round(rounded)) < 1e-9:
+        body = f"{int(round(rounded)):,}"
+    else:
+        body = f"{rounded:,.2f}"
+    return f"{currency} {body}".strip()
+
+
+def format_date_text(value: date) -> str:
+    return f"{value.day} {value.strftime('%B')} {value.year}"
 
 
 def format_payment_plan(payments: list[tuple[date, float]]) -> str:
@@ -157,14 +173,22 @@ def cash_events_for_end(
     if end_date <= forecast.forecast_end:
         return forecast.cash_events
     notes: list[str] = []
-    return build_forecast_events(
+    cash_events, _series = build_forecast_events(
         events_df,
         forecast.forecast_start,
         end_date,
         str(profile.get("home_currency", "") or ""),
         exchange_rates_df,
         notes,
+        spending_overrides=forecast_overrides(forecast),
+        protected_categories=split_categories(profile.get("expense_categories_to_protect")),
     )
+    return cash_events
+
+
+def forecast_overrides(forecast: ForecastResult) -> list[dict[str, Any]] | None:
+    extra = getattr(forecast, "spending_overrides", None)
+    return extra or None
 
 
 def collect_candidate_plans(
@@ -176,6 +200,7 @@ def collect_candidate_plans(
     exchange_rates_df: pd.DataFrame | None,
     earliest: date | None,
     notes: list[str],
+    allow_partial: bool = True,
 ) -> list[CandidatePlan]:
     request_date = forecast.forecast_start
     requested = forecast.requested_amount
@@ -234,7 +259,8 @@ def collect_candidate_plans(
         )
 
     if (
-        "partial_payment" in methods
+        allow_partial
+        and "partial_payment" in methods
         and allows_partial
         and 0 < forecast.amount_safe_to_pay < requested
         and earliest is not None
@@ -302,42 +328,199 @@ def status_for_method(method: str, start_date: date, request_date: date) -> str:
     return "not_affordable"
 
 
+def format_change_text(change_text: str, events_df: pd.DataFrame) -> str:
+    if change_text == "none" or events_df is None or events_df.empty:
+        return ""
+    parts = []
+    for item in change_text.split("|"):
+        if item.startswith("stop:"):
+            event_id = item.split(":", 1)[1]
+            matches = events_df[events_df["event_id"].astype(str) == event_id]
+            label = str(matches.iloc[0]["description"]) if not matches.empty else event_id
+            parts.append(f"stop the {label.lower()}")
+        elif item.startswith("reduce_to:"):
+            _, event_id, amount = item.split(":", 2)
+            matches = events_df[events_df["event_id"].astype(str) == event_id]
+            label = str(matches.iloc[0]["description"]) if not matches.empty else event_id
+            currency = str(matches.iloc[0]["currency"]) if not matches.empty else ""
+            parts.append(f"reduce the {label.lower()} to {format_money_text(float(amount), currency)}")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0].capitalize()
+    return (", ".join(parts[:-1]) + f", and {parts[-1]}").capitalize()
+
+
 def build_explanation(
     decision_method: str,
     payments: list[tuple[date, float]],
     forecast: ForecastResult,
     currency: str,
+    spending_changes: str = "none",
+    events_df: pd.DataFrame | None = None,
+    deadline: date | None = None,
 ) -> str:
-    money = format_amount
     currency = currency or ""
-    minimum = money(forecast.minimum_balance_required)
+    minimum = format_money_text(forecast.minimum_balance_required, currency)
+    events_for_text = events_df if events_df is not None else pd.DataFrame()
+    change_prefix = format_change_text(spending_changes, events_for_text)
+    lead = f"{change_prefix}, then " if change_prefix else ""
+
     if decision_method == "full_payment" and payments and payments[0][0] == forecast.forecast_start:
         return (
-            f"Pay {currency} {money(payments[0][1])} today. "
-            f"The 90-day forecast stays at or above {currency} {minimum}."
+            f"{lead}Pay {format_money_text(payments[0][1], currency)} today. "
+            f"This leaves at least {minimum} available over the next 90 days."
         ).strip()
     if decision_method == "wait" and payments:
         return (
-            f"Wait until {payments[0][0].isoformat()}, then pay "
-            f"{currency} {money(payments[0][1])} in full. "
-            f"Paying earlier would put the {currency} {minimum} minimum at risk."
+            f"Pay {format_money_text(payments[0][1], currency)} in full on "
+            f"{format_date_text(payments[0][0])}. "
+            f"Paying earlier would take the balance below the {minimum} minimum."
         ).strip()
     if decision_method == "partial_payment" and len(payments) == 2:
         return (
-            f"Pay {currency} {money(payments[0][1])} today and the remaining "
-            f"{currency} {money(payments[1][1])} on {payments[1][0].isoformat()}. "
-            f"This completes the request and keeps the {currency} {minimum} minimum protected."
+            f"{lead}Pay {format_money_text(payments[0][1], currency)} today and the remaining "
+            f"{format_money_text(payments[1][1], currency)} on {format_date_text(payments[1][0])}. "
+            f"This completes the full request and keeps the {minimum} minimum protected."
         ).strip()
     if decision_method == "installments" and payments:
         return (
-            f"Use {len(payments)} installments of {currency} {money(payments[0][1])}, "
-            f"starting {payments[0][0].isoformat()}. "
-            f"This leaves at least {currency} {minimum} available."
+            f"{lead}Use {len(payments)} installments of {format_money_text(payments[0][1], currency)}, "
+            f"starting {format_date_text(payments[0][0])}. "
+            f"This leaves at least {minimum} available."
         ).strip()
+    if forecast.amount_safe_to_pay > 0:
+        requested_text = format_money_text(forecast.requested_amount, currency)
+        safe_text = format_money_text(forecast.amount_safe_to_pay, currency)
+        return (
+            f"Do not proceed with the {requested_text} request. "
+            f"Although {safe_text} is available today, the full amount cannot be "
+            f"completed safely within 90 days."
+        )
+    deadline_text = f" by {format_date_text(deadline)}" if deadline else " within the forecast window"
     return (
-        f"Do not make this payment within the forecast window. "
-        f"None of the eligible options keeps the {currency} {minimum} minimum protected."
+        f"Do not make this payment{deadline_text}. "
+        f"None of the available options keeps the {minimum} minimum protected."
     ).strip()
+
+
+def _blank(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "nan" else text
+
+
+def spending_change_candidates(
+    forecast: ForecastResult,
+    profile: pd.Series | dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build stop/reduce options from recurring series the forecast actually uses."""
+    stop_cats = split_categories(profile.get("expense_categories_user_is_willing_to_stop"))
+    reduce_cats = split_categories(profile.get("expense_categories_user_is_willing_to_reduce"))
+    if not stop_cats and not reduce_cats:
+        return []
+
+    candidates = []
+    for item in forecast.recurring_series:
+        event_type, category, _description = item["key"]
+        if event_type not in {"expense", "subscription"}:
+            continue
+        flexibility = str(item.get("flexibility") or "").lower()
+        event_id = str(item.get("source_event_id") or "")
+        if not event_id:
+            continue
+        if category in stop_cats and flexibility in {"stoppable", "reducible_or_stoppable"}:
+            candidates.append(
+                {
+                    "text": f"stop:{event_id}",
+                    "override": {"key": item["key"], "mode": "stop", "event_id": event_id},
+                }
+            )
+        if category in reduce_cats and flexibility in {"reducible", "reducible_or_stoppable"}:
+            minimum = item.get("minimum_allowed_amount")
+            if minimum is None:
+                continue
+            candidates.append(
+                {
+                    "text": f"reduce_to:{event_id}:{format_amount(float(minimum))}",
+                    "override": {
+                        "key": item["key"],
+                        "mode": "reduce",
+                        "amount": float(minimum),
+                        "event_id": event_id,
+                    },
+                }
+            )
+    candidates.sort(key=lambda item: item["text"])
+    return candidates
+
+
+def overrides_from_change_text(
+    change_text: str,
+    events_df: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """Turn a spending_changes_needed string into forecast overrides."""
+    if not change_text or change_text == "none" or events_df is None or events_df.empty:
+        return []
+    overrides = []
+    for item in change_text.split("|"):
+        if item.startswith("stop:"):
+            event_id = item.split(":", 1)[1]
+            mode = "stop"
+            amount = None
+        elif item.startswith("reduce_to:"):
+            _prefix, event_id, amount_text = item.split(":", 2)
+            mode = "reduce"
+            amount = float(amount_text)
+        else:
+            continue
+        matches = events_df[events_df["event_id"].astype(str) == event_id]
+        if matches.empty:
+            continue
+        row = matches.iloc[0]
+        key = (
+            str(row.get("event_type", "") or ""),
+            str(row.get("category", "") or ""),
+            str(row.get("description", "") or ""),
+        )
+        override = {"key": key, "mode": mode, "event_id": event_id}
+        if amount is not None:
+            override["amount"] = amount
+        overrides.append(override)
+    return overrides
+
+
+def combine_change_sets(candidates: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Try 1-3 changes. Stop and reduce of the same event are exclusive."""
+    combos: list[list[dict[str, Any]]] = []
+    for first in candidates:
+        combos.append([first])
+    for i, first in enumerate(candidates):
+        for second in candidates[i + 1 :]:
+            if first["override"]["event_id"] == second["override"]["event_id"]:
+                continue
+            combos.append([first, second])
+    for i, first in enumerate(candidates):
+        for j, second in enumerate(candidates[i + 1 :], start=i + 1):
+            if first["override"]["event_id"] == second["override"]["event_id"]:
+                continue
+            for third in candidates[j + 1 :]:
+                ids = {
+                    first["override"]["event_id"],
+                    second["override"]["event_id"],
+                    third["override"]["event_id"],
+                }
+                if len(ids) < 3:
+                    continue
+                combos.append([first, second, third])
+    return combos
+
+
+def changes_to_text(combo: list[dict[str, Any]]) -> str:
+    if not combo:
+        return "none"
+    return "|".join(item["text"] for item in combo)
 
 
 def recommend_plan(
@@ -357,6 +540,7 @@ def recommend_plan(
 
     request_id = str(request.get("request_id", "") or "")
     currency = str(profile.get("home_currency", "") or "")
+    deadline = parse_date(request.get("desired_completion_date"))
     earliest = find_earliest_full_payment_date(
         forecast.starting_balance,
         forecast.minimum_balance_required,
@@ -377,6 +561,42 @@ def recommend_plan(
         earliest,
         notes,
     )
+    for plan in plans:
+        plan.spending_changes = "none"
+
+    # Spending changes are optional and only used when they unlock a better plan.
+    if not any(plan.completes_by_deadline and plan.spending_changes == "none" for plan in plans):
+        for combo in combine_change_sets(spending_change_candidates(forecast, profile)):
+            changed = run_forecast(
+                request,
+                profile,
+                events_df,
+                exchange_rates_df,
+                spending_overrides=[item["override"] for item in combo],
+            )
+            changed_earliest = find_earliest_full_payment_date(
+                changed.starting_balance,
+                changed.minimum_balance_required,
+                changed.requested_amount,
+                changed.forecast_start,
+                changed.forecast_end,
+                changed.cash_events,
+            )
+            changed_plans = collect_candidate_plans(
+                request,
+                profile,
+                changed,
+                payment_options_df,
+                events_df,
+                exchange_rates_df,
+                changed_earliest,
+                notes,
+                allow_partial=False,
+            )
+            change_text = changes_to_text(combo)
+            for plan in changed_plans:
+                plan.spending_changes = change_text
+                plans.append(plan)
 
     if not plans:
         return Decision(
@@ -387,12 +607,16 @@ def recommend_plan(
             payment_plan="none",
             earliest_date_for_full_payment=earliest_text,
             spending_changes_needed="none",
-            decision_explanation=build_explanation("not_recommended", [], forecast, currency),
+            decision_explanation=build_explanation(
+                "not_recommended", [], forecast, currency, deadline=deadline
+            ),
             notes=notes,
         )
 
     best = min(plans, key=lambda plan: plan.rank_tuple())
     status = status_for_method(best.method, best.start_date, forecast.forecast_start)
+    if best.spending_changes != "none" and best.method == "full_payment":
+        status = "affordable_with_plan"
     return Decision(
         request_id=request_id,
         amount_safe_to_pay=round_money(forecast.amount_safe_to_pay),
@@ -400,8 +624,16 @@ def recommend_plan(
         recommended_payment_method=best.method,
         payment_plan=format_payment_plan(best.payments),
         earliest_date_for_full_payment=earliest_text,
-        spending_changes_needed="none",
-        decision_explanation=build_explanation(best.method, best.payments, forecast, currency),
+        spending_changes_needed=best.spending_changes,
+        decision_explanation=build_explanation(
+            best.method,
+            best.payments,
+            forecast,
+            currency,
+            best.spending_changes,
+            events_df,
+            deadline,
+        ),
         notes=notes,
     )
 

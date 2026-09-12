@@ -207,6 +207,35 @@ def apply_extracted_facts(
                 notes.append(f"{source_id}: marked {event_id} cancelled.")
             continue
 
+        if action == "end_income":
+            new_id = f"evidence_{source_id}_end"
+            if _event_index(patched, new_id) is not None:
+                notes.append(f"{source_id}: income-end marker {new_id} already exists.")
+                continue
+            end_date = parsed_date.isoformat() if parsed_date else ""
+            if not end_date:
+                notes.append(f"{source_id}: skipped end_income because the date is invalid.")
+                continue
+            new_row = {
+                "event_id": new_id,
+                "user_id": patched["user_id"].iloc[0] if not patched.empty else "",
+                "event_type": "income",
+                "description": "Final employer payroll",
+                "category": "salary",
+                "direction": "credit",
+                "amount": 0.0,
+                "currency": currency,
+                "event_date": end_date,
+                "settlement_date": end_date,
+                "status": "settled",
+                "linked_event_id": "",
+                "flexibility": "fixed",
+                "minimum_allowed_amount": "",
+            }
+            patched = pd.concat([patched, pd.DataFrame([new_row])], ignore_index=True)
+            notes.append(f"{source_id}: marked income ended on {end_date}.")
+            continue
+
         if action in {"confirm_income", "confirm_expense"}:
             if amount is None or parsed_date is None or not fact.get("is_confirmed"):
                 notes.append(

@@ -11,6 +11,7 @@ from decide import run_simple_decision_tests
 from evidence import run_simple_evidence_tests
 from forecast import run_simple_tests
 from gemini_extract import UsageRecord, write_usage_report
+from message_facts import run_simple_message_tests
 from predict import generate_predictions, summarize_rows, write_output_csv
 
 
@@ -22,6 +23,7 @@ CSV_PATHS = {
     "events": DATASET_DIR / "financial_events.csv",
     "exchange_rates": DATASET_DIR / "exchange_rates.csv",
     "payment_options": DATASET_DIR / "request_payment_options.csv",
+    "messages": DATASET_DIR / "messages.csv",
 }
 OUTPUT_PATH = DATASET_DIR / "output.csv"
 ROOT_OUTPUT_PATH = REPO_ROOT / "output.csv"
@@ -46,6 +48,7 @@ def main() -> int:
         run_simple_tests()
         run_simple_decision_tests()
         run_simple_evidence_tests()
+        run_simple_message_tests()
         print()
 
         requests_df = load_csv(CSV_PATHS["requests"], "requests.csv")
@@ -57,6 +60,7 @@ def main() -> int:
         exchange_rates_df = load_csv(
             CSV_PATHS["exchange_rates"], "exchange_rates.csv", required=False
         )
+        messages_df = load_csv(CSV_PATHS["messages"], "messages.csv", required=False)
 
         print(f"Generating predictions for {len(requests_df)} requests...")
         rows = generate_predictions(
@@ -65,6 +69,7 @@ def main() -> int:
             events_df,
             payment_options_df,
             exchange_rates_df,
+            messages_df,
         )
         write_output_csv(OUTPUT_PATH, rows)
         write_output_csv(ROOT_OUTPUT_PATH, rows)

@@ -14,7 +14,9 @@ from typing import Any
 import pandas as pd
 
 from decide import Decision, format_amount, recommend_plan
-from forecast import run_forecast
+from evidence import apply_extracted_facts, select_messages
+from forecast import parse_date, run_forecast
+from message_facts import extract_message_facts
 
 
 OUTPUT_COLUMNS = [
@@ -51,15 +53,33 @@ def predict_one(
     events_df: pd.DataFrame,
     payment_options_df: pd.DataFrame,
     exchange_rates_df: pd.DataFrame | None,
+    messages_df: pd.DataFrame | None = None,
 ) -> Decision:
     """Run forecast + plan ranking for a single request."""
-    forecast = run_forecast(request, profile, events_df, exchange_rates_df)
+    request_date = parse_date(request["request_date"])
+    if request_date is None:
+        raise ValueError("request_date is missing or invalid.")
+    selected = select_messages(
+        messages_df if messages_df is not None else pd.DataFrame(),
+        str(request["user_id"]),
+        str(request["request_id"]),
+    )
+    facts = extract_message_facts(
+        selected,
+        events_df,
+        request_date,
+        str(profile.get("home_currency", "") or ""),
+    )
+    patched_events, _notes = apply_extracted_facts(
+        events_df, facts, str(profile.get("home_currency", "") or "")
+    )
+    forecast = run_forecast(request, profile, patched_events, exchange_rates_df)
     return recommend_plan(
         request,
         profile,
         forecast,
         payment_options_df,
-        events_df,
+        patched_events,
         exchange_rates_df,
     )
 
@@ -84,6 +104,7 @@ def generate_predictions(
     events_df: pd.DataFrame,
     payment_options_df: pd.DataFrame,
     exchange_rates_df: pd.DataFrame | None = None,
+    messages_df: pd.DataFrame | None = None,
     progress_every: int = 50,
 ) -> list[dict[str, str]]:
     """Preserve requests.csv order. Do not look up sample labels."""
@@ -98,7 +119,12 @@ def generate_predictions(
         user_events = events_by_user.get(user_id, pd.DataFrame())
         request_options = options_by_request.get(request_id, pd.DataFrame())
         decision = predict_one(
-            request, profile, user_events, request_options, exchange_rates_df
+            request,
+            profile,
+            user_events,
+            request_options,
+            exchange_rates_df,
+            messages_df,
         )
         rows.append(decision_to_row(decision))
         done = len(rows)

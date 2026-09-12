@@ -25,9 +25,12 @@ from decide import (  # noqa: E402
     build_option_schedule,
     format_amount,
     is_truthy,
+    overrides_from_change_text,
     user_methods,
 )
+from evidence import apply_extracted_facts, select_messages  # noqa: E402
 from forecast import parse_date, parse_number, run_forecast, simulate_balances  # noqa: E402
+from message_facts import extract_message_facts  # noqa: E402
 
 
 OUTPUT_COLUMNS = [
@@ -104,6 +107,7 @@ def check_row(
     options_df: pd.DataFrame,
     events_df: pd.DataFrame,
     exchange_rates_df: pd.DataFrame,
+    messages_df: pd.DataFrame,
     errors: list[str],
 ) -> None:
     request_id = str(row["request_id"])
@@ -226,7 +230,25 @@ def check_row(
             errors.append(prefix + "installment plan does not match a supplied payment option")
 
     if payments:
-        forecast = run_forecast(request, profile, events_df, exchange_rates_df)
+        selected = select_messages(
+            messages_df, str(request["user_id"]), str(request["request_id"])
+        )
+        facts = extract_message_facts(
+            selected,
+            events_df,
+            request_date,
+            str(profile.get("home_currency", "") or ""),
+        )
+        patched_events, _notes = apply_extracted_facts(
+            events_df, facts, str(profile.get("home_currency", "") or "")
+        )
+        forecast = run_forecast(
+            request,
+            profile,
+            patched_events,
+            exchange_rates_df,
+            spending_overrides=overrides_from_change_text(changes, patched_events),
+        )
         last_payment = max(pay_date for pay_date, _amount in payments)
         lowest, _, _, _, _ = simulate_balances(
             forecast.starting_balance,
@@ -253,6 +275,8 @@ def main() -> int:
         options_df = pd.read_csv(DATASET_DIR / "request_payment_options.csv")
         rates_path = DATASET_DIR / "exchange_rates.csv"
         rates_df = pd.read_csv(rates_path) if rates_path.exists() else pd.DataFrame()
+        messages_path = DATASET_DIR / "messages.csv"
+        messages_df = pd.read_csv(messages_path) if messages_path.exists() else pd.DataFrame()
     except FileNotFoundError as error:
         print(f"EVALUATION FAILED: {error}")
         return 1
@@ -289,6 +313,7 @@ def main() -> int:
             options_by_request.get(str(row["request_id"]), pd.DataFrame()),
             events_by_user.get(str(request["user_id"]), pd.DataFrame()),
             rates_df,
+            messages_df,
             errors,
         )
 

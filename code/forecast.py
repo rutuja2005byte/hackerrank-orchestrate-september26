@@ -33,6 +33,11 @@ ONE_OFF_INCOME_HINTS = (
     "prorated",
     "windfall",
 )
+ENDED_INCOME_HINTS = (
+    "final employer",
+    "previous employer",
+    "last payroll",
+)
 
 
 @dataclass
@@ -47,6 +52,9 @@ class CashEvent:
     description: str
     source: str
     event_id: str = ""
+    flexibility: str = ""
+    minimum_allowed_amount: float | None = None
+    cycle_date: date | None = None
 
 
 @dataclass
@@ -65,6 +73,8 @@ class ForecastResult:
     notes: list[str] = field(default_factory=list)
     applied_event_count: int = 0
     cash_events: list[CashEvent] = field(default_factory=list)
+    spending_overrides: list[dict[str, Any]] = field(default_factory=list)
+    recurring_series: list[dict[str, Any]] = field(default_factory=list)
 
 
 def parse_date(value: Any) -> date | None:
@@ -225,6 +235,9 @@ def classify_event_row(
         description=description,
         source=status,
         event_id=event_id,
+        flexibility=str(row.get("flexibility", "") or "").strip().lower(),
+        minimum_allowed_amount=optional_number(row.get("minimum_allowed_amount")),
+        cycle_date=parse_date(row.get("event_date")) or cash_date,
     )
 
     if status == "pending" and direction == "credit":
@@ -244,13 +257,71 @@ def classify_event_row(
     return "ignored", None
 
 
-def detect_monthly_series(history: list[CashEvent]) -> list[dict[str, Any]]:
-    """
-    Find monthly series from settled history.
+def cycle_on(event: CashEvent) -> date:
+    return event.cycle_date or event.cash_date
 
-    A series is kept only when the same type, category, and description
-    appear at least 3 times and the median gap is about one month.
+
+def same_day_of_month(items: list[CashEvent]) -> bool:
+    """True when dates cluster on the same calendar day, including month-end wrap."""
+    days = sorted(cycle_on(event).day for event in items)
+    if days[-1] - days[0] <= 2:
+        return True
+    lows = [day for day in days if day <= 3]
+    highs = [day for day in days if day >= 28]
+    return bool(lows) and bool(highs) and len(lows) + len(highs) == len(days)
+
+
+def gap_days(items: list[CashEvent]) -> list[int]:
+    ordered = sorted(items, key=lambda event: cycle_on(event))
+    gaps = [
+        (cycle_on(ordered[index]) - cycle_on(ordered[index - 1])).days
+        for index in range(1, len(ordered))
+    ]
+    return [gap for gap in gaps if gap > 0]
+
+
+def looks_monthly(items: list[CashEvent]) -> bool:
     """
+    Recurrence only when history supports a monthly cycle.
+
+    Expense descriptions need three monthly points. Income, subscriptions,
+    and debt can use two same-day-of-month points. A late settlement does
+    not break a series that is regular on event_date.
+    """
+    if len(items) < 2:
+        return False
+    gaps = gap_days(items)
+    if not gaps:
+        return False
+    monthly_gaps = [gap for gap in gaps if 25 <= gap <= 36]
+    event_type = items[0].event_type
+    if len(items) >= 3 and monthly_gaps and len(monthly_gaps) >= len(gaps) - 1:
+        return True
+    if event_type in {"income", "subscription", "debt_payment"}:
+        if len(items) >= 2 and same_day_of_month(items) and monthly_gaps:
+            return True
+    return False
+
+
+def series_from_items(key: tuple[str, str, str], items: list[CashEvent]) -> dict[str, Any]:
+    items = sorted(items, key=lambda event: cycle_on(event))
+    event_type, _category, _description = key
+    amounts = [event.amount for event in items]
+    amount = min(amounts[-3:]) if event_type == "income" else amounts[-1]
+    latest = items[-1]
+    return {
+        "key": key,
+        "last_date": cycle_on(latest),
+        "amount": amount,
+        "direction": latest.direction,
+        "source_event_id": latest.event_id,
+        "flexibility": latest.flexibility,
+        "minimum_allowed_amount": latest.minimum_allowed_amount,
+    }
+
+
+def detect_monthly_series(history: list[CashEvent]) -> list[dict[str, Any]]:
+    """Find monthly series from settled history. Do not invent one-off income."""
     groups: dict[tuple[str, str, str], list[CashEvent]] = defaultdict(list)
     for event in history:
         groups[(event.event_type, event.category, event.description)].append(event)
@@ -258,35 +329,162 @@ def detect_monthly_series(history: list[CashEvent]) -> list[dict[str, Any]]:
     series = []
     for key, items in groups.items():
         items = sorted(items, key=lambda event: event.cash_date)
-        if len(items) < 3:
+        if not looks_monthly(items):
             continue
-        gaps = [
-            (items[index].cash_date - items[index - 1].cash_date).days
-            for index in range(1, len(items))
-        ]
-        gaps = [gap for gap in gaps if gap > 0]
-        if not gaps:
-            continue
-        median_gap = sorted(gaps)[len(gaps) // 2]
-        if not 25 <= median_gap <= 36:
-            continue
-
         event_type, _category, description = key
         if event_type == "income" and is_one_off_income(description):
             continue
+        if event_type == "income" and income_series_has_ended(history, items[-1].cash_date):
+            continue
+        series.append(series_from_items(key, items))
 
-        amounts = [event.amount for event in items]
-        # Conservative: smaller future income, larger future expenses.
-        amount = min(amounts[-3:]) if event_type == "income" else max(amounts[-3:])
+    existing_keys = {item["key"] for item in series}
+    series.extend(detect_flexible_category_series(history, existing_keys))
+    return series
+
+
+def detect_protected_variable_series(
+    history: list[CashEvent],
+    existing_keys: set[tuple[str, str, str]],
+    protected_categories: set[str],
+    request_date: date,
+) -> list[dict[str, Any]]:
+    """
+    Reserve a conservative monthly amount for protected categories that
+    spend often but do not have a clean monthly description cycle.
+    """
+    if not protected_categories:
+        return []
+    covered = {key[1] for key in existing_keys}
+    grouped: dict[str, list[CashEvent]] = defaultdict(list)
+    for event in history:
+        if event.direction != "debit":
+            continue
+        if event.category not in protected_categories:
+            continue
+        if event.category in covered:
+            continue
+        grouped[event.category].append(event)
+
+    series = []
+    start = request_date - relativedelta(months=3)
+    for category, items in grouped.items():
+        recent = [event for event in items if event.cash_date >= start]
+        if len(recent) < 3:
+            continue
+        buckets: dict[tuple[int, int], float] = defaultdict(float)
+        for event in recent:
+            buckets[(event.cash_date.year, event.cash_date.month)] += event.amount
+        totals = sorted(buckets.values())
+        if len(totals) < 2:
+            continue
+        monthly = totals[len(totals) // 2]
+        if monthly <= 0:
+            continue
+        latest = max(recent, key=lambda event: (event.cash_date, event.event_id))
         series.append(
             {
-                "key": key,
-                "last_date": items[-1].cash_date,
-                "amount": amount,
-                "direction": items[-1].direction,
+                "key": (latest.event_type, latest.category, latest.description),
+                "last_date": latest.cash_date,
+                "amount": monthly,
+                "direction": latest.direction,
+                "source_event_id": latest.event_id,
+                "flexibility": latest.flexibility,
+                "minimum_allowed_amount": latest.minimum_allowed_amount,
             }
         )
     return series
+
+
+def detect_flexible_category_series(
+    history: list[CashEvent],
+    existing_keys: set[tuple[str, str, str]],
+) -> list[dict[str, Any]]:
+    """
+    Flexible dining/subscriptions without a clean description cycle still
+    need a conservative monthly reserve. Use the latest flexible event as
+    the series identity so stop/reduce can name that event_id.
+    """
+    flexible = {"stoppable", "reducible", "reducible_or_stoppable"}
+    grouped: dict[tuple[str, str], list[CashEvent]] = defaultdict(list)
+    for event in history:
+        if event.event_type not in {"expense", "subscription"}:
+            continue
+        if event.flexibility not in flexible:
+            continue
+        grouped[(event.event_type, event.category)].append(event)
+
+    covered_categories = {(key[0], key[1]) for key in existing_keys}
+    series = []
+    for (event_type, category), items in grouped.items():
+        if (event_type, category) in covered_categories:
+            continue
+        if len(items) < 2:
+            continue
+        latest = max(items, key=lambda event: (event.cash_date, event.event_id))
+        key = (latest.event_type, latest.category, latest.description)
+        series.append(series_from_items(key, [latest, latest]))
+        series[-1]["last_date"] = latest.cash_date
+        series[-1]["amount"] = latest.amount
+    return series
+
+
+def apply_explicit_income_amounts(
+    series: list[dict[str, Any]],
+    explicit: list[CashEvent],
+    history: list[CashEvent],
+) -> list[dict[str, Any]]:
+    """Use a confirmed future salary amount for later projections of that category."""
+    latest_by_cat: dict[tuple[str, str], CashEvent] = {}
+    for event in explicit:
+        if event.event_type != "income" or event.direction != "credit":
+            continue
+        if is_one_off_income(event.description):
+            continue
+        key = (event.event_type, event.category)
+        previous = latest_by_cat.get(key)
+        if previous is None or event.cash_date >= previous.cash_date:
+            latest_by_cat[key] = event
+
+    covered = set()
+    for item in series:
+        event_type, category, _description = item["key"]
+        covered.add((event_type, category))
+        explicit_event = latest_by_cat.get((event_type, category))
+        if explicit_event is not None:
+            item["amount"] = explicit_event.amount
+            item["last_date"] = explicit_event.cash_date
+
+    for (event_type, category), event in latest_by_cat.items():
+        if (event_type, category) in covered:
+            continue
+        if income_series_has_ended(history, event.cash_date):
+            continue
+        series.append(
+            {
+                "key": (event.event_type, event.category, event.description),
+                "last_date": event.cash_date,
+                "amount": event.amount,
+                "direction": event.direction,
+                "source_event_id": event.event_id,
+                "flexibility": event.flexibility,
+                "minimum_allowed_amount": event.minimum_allowed_amount,
+            }
+        )
+    return series
+
+
+def income_series_has_ended(history: list[CashEvent], last_regular_date: date) -> bool:
+    """Do not project payroll after an explicit end-of-employment record."""
+    for event in history:
+        if event.event_type != "income":
+            continue
+        if event.cash_date <= last_regular_date:
+            continue
+        text = event.description.lower()
+        if any(hint in text for hint in ENDED_INCOME_HINTS):
+            return True
+    return False
 
 
 def project_monthly_series(
@@ -294,15 +492,29 @@ def project_monthly_series(
     request_date: date,
     forecast_end: date,
     explicit_events: list[CashEvent],
+    spending_overrides: list[dict[str, Any]] | None = None,
 ) -> list[CashEvent]:
     """Project each monthly series forward, skipping dates already covered."""
     explicit_dates = defaultdict(list)
+    explicit_income_dates = defaultdict(list)
     for event in explicit_events:
         key = (event.event_type, event.category, event.description)
         explicit_dates[key].append(event.cash_date)
+        if event.event_type == "income":
+            explicit_income_dates[(event.event_type, event.category)].append(event.cash_date)
+
+    override_by_key = {}
+    for override in spending_overrides or []:
+        override_by_key[tuple(override["key"])] = override
 
     projected: list[CashEvent] = []
     for item in series:
+        override = override_by_key.get(item["key"])
+        if override and override.get("mode") == "stop":
+            continue
+        amount = item["amount"]
+        if override and override.get("mode") == "reduce":
+            amount = float(override["amount"])
         current = item["last_date"]
         for _ in range(8):
             current = current + relativedelta(months=1)
@@ -314,13 +526,18 @@ def project_monthly_series(
                 abs((other - current).days) <= 2
                 for other in explicit_dates[item["key"]]
             )
+            event_type, category, description = item["key"]
+            if event_type == "income":
+                clash = clash or any(
+                    abs((other - current).days) <= 2
+                    for other in explicit_income_dates[(event_type, category)]
+                )
             if clash:
                 continue
-            event_type, category, description = item["key"]
             projected.append(
                 CashEvent(
                     cash_date=current,
-                    amount=item["amount"],
+                    amount=amount,
                     direction=item["direction"],
                     event_type=event_type,
                     category=category,
@@ -476,7 +693,9 @@ def build_forecast_events(
     home_currency: str,
     exchange_rates_df: pd.DataFrame | None,
     notes: list[str],
-) -> list[CashEvent]:
+    spending_overrides: list[dict[str, Any]] | None = None,
+    protected_categories: set[str] | None = None,
+) -> tuple[list[CashEvent], list[dict[str, Any]]]:
     """Turn one user's rows into history-based projections plus explicit futures."""
     history: list[CashEvent] = []
     explicit: list[CashEvent] = []
@@ -493,7 +712,15 @@ def build_forecast_events(
             explicit.append(event)
 
     series = detect_monthly_series(history)
-    projected = project_monthly_series(series, request_date, forecast_end, explicit)
+    series.extend(
+        detect_protected_variable_series(
+            history, {item["key"] for item in series}, protected_categories or set(), request_date
+        )
+    )
+    series = apply_explicit_income_amounts(series, explicit, history)
+    projected = project_monthly_series(
+        series, request_date, forecast_end, explicit, spending_overrides
+    )
     notes.append(
         f"Detected {len(series)} monthly series from history and "
         f"projected {len(projected)} future occurrences."
@@ -501,7 +728,7 @@ def build_forecast_events(
     notes.append(
         f"Applied {len(explicit)} explicit pending/scheduled/future-settled events."
     )
-    return explicit + projected
+    return explicit + projected, series
 
 
 def calculate_amount_safe_to_pay(
@@ -529,6 +756,7 @@ def run_forecast(
     profile: pd.Series | dict[str, Any],
     events_df: pd.DataFrame,
     exchange_rates_df: pd.DataFrame | None = None,
+    spending_overrides: list[dict[str, Any]] | None = None,
 ) -> ForecastResult:
     """Build the 90-day forecast for one request / profile / event set."""
     notes: list[str] = []
@@ -550,13 +778,15 @@ def run_forecast(
     if events_df is None:
         events_df = pd.DataFrame()
 
-    cash_events = build_forecast_events(
+    cash_events, recurring_series = build_forecast_events(
         events_df,
         request_date,
         forecast_end,
         home_currency,
         exchange_rates_df,
         notes,
+        spending_overrides,
+        protected,
     )
     safe_amount, lowest, lowest_date = calculate_amount_safe_to_pay(
         starting_balance,
@@ -588,6 +818,8 @@ def run_forecast(
         notes=notes,
         applied_event_count=applied,
         cash_events=cash_events,
+        spending_overrides=list(spending_overrides or []),
+        recurring_series=recurring_series,
     )
 
 
@@ -687,7 +919,7 @@ def run_simple_tests() -> None:
         date(2024, 3, 31),
         build_forecast_events(
             rent_history, date(2024, 1, 1), date(2024, 3, 31), "USD", None, []
-        ),
+        )[0],
         payment_on_request_date=with_rent.amount_safe_to_pay,
     )
     assert paid_ok >= 200
@@ -698,7 +930,7 @@ def run_simple_tests() -> None:
         date(2024, 3, 31),
         build_forecast_events(
             rent_history, date(2024, 1, 1), date(2024, 3, 31), "USD", None, []
-        ),
+        )[0],
         payment_on_request_date=with_rent.amount_safe_to_pay + 0.01,
     )
     assert paid_too_much < 200
