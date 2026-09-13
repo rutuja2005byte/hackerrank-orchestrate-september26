@@ -4,6 +4,10 @@ Personal finance agent that answers one question per request: **pay now, spread 
 
 I built this for HackerRank Orchestrate (September 2026). It reads a user’s profile, transaction history, payment offers, messages, and dated FX rates, then writes a safe recommendation for all **250** requests.
 
+<p align="center">
+  <img src="img.png" alt="Buy or Wait? CLI — 250 requests scored, contract passed" width="920">
+</p>
+
 ---
 
 ## What I built
