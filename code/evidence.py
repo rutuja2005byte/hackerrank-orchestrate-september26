@@ -285,7 +285,7 @@ def apply_extracted_facts(
     return patched, notes
 
 
-def run_simple_evidence_tests() -> None:
+def run_simple_evidence_tests(quiet: bool = False) -> None:
     """Deterministic application tests. These do not call Gemini."""
     events = pd.DataFrame(
         [
@@ -420,4 +420,5 @@ def run_simple_evidence_tests() -> None:
     parsed = parse_facts_payload('{"facts": [{"source_id": "x", "action": "ignore"}]}')
     assert parsed[0]["source_id"] == "x"
 
-    print("Phase 4 simple tests: all assertions passed.")
+    if not quiet:
+        print("Evidence checks passed.")

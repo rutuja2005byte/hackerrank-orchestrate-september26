@@ -6,6 +6,7 @@ Gemini is not used on the full-dataset run so predictions stay deterministic.
 
 from pathlib import Path
 import sys
+from typing import Any
 
 from decide import run_simple_decision_tests
 from evidence import run_simple_evidence_tests
@@ -33,6 +34,39 @@ USAGE_REPORT_PATHS = (
 )
 
 
+STATUS_LABELS = {
+    "affordable_now": "Affordable now",
+    "affordable_with_plan": "Affordable with a plan",
+    "affordable_later": "Affordable later",
+    "not_affordable": "Not affordable",
+}
+METHOD_LABELS = {
+    "full_payment": "Pay in full",
+    "partial_payment": "Pay in part",
+    "installments": "Use installments",
+    "wait": "Wait",
+    "not_recommended": "Do not proceed",
+}
+
+
+def print_count_block(title: str, counts: dict[str, int], labels: dict[str, str]) -> None:
+    print(title)
+    for key, label in labels.items():
+        if key in counts:
+            print(f"  {label:<24} {counts[key]}")
+
+
+def print_run_summary(rows: list[dict[str, Any]]) -> None:
+    summary = summarize_rows(rows)
+    print()
+    print(f"Saved {summary['count']} recommendations to output.csv")
+    print()
+    print_count_block("Affordability", summary["status"], STATUS_LABELS)
+    print()
+    print_count_block("Recommendation", summary["method"], METHOD_LABELS)
+    print()
+
+
 def load_csv(path: Path, file_label: str, required: bool = True):
     import pandas as pd
 
@@ -48,10 +82,12 @@ def load_csv(path: Path, file_label: str, required: bool = True):
 
 def main() -> int:
     try:
-        run_simple_tests()
-        run_simple_decision_tests()
-        run_simple_evidence_tests()
-        run_simple_message_tests()
+        print("Running checks...")
+        run_simple_tests(quiet=True)
+        run_simple_decision_tests(quiet=True)
+        run_simple_evidence_tests(quiet=True)
+        run_simple_message_tests(quiet=True)
+        print("Checks passed.")
         print()
 
         requests_df = load_csv(CSV_PATHS["requests"], "requests.csv")
@@ -65,7 +101,7 @@ def main() -> int:
         )
         messages_df = load_csv(CSV_PATHS["messages"], "messages.csv", required=False)
 
-        print(f"Generating predictions for {len(requests_df)} requests...")
+        print(f"Writing recommendations for {len(requests_df)} requests...")
         rows = generate_predictions(
             requests_df,
             profiles_df,
@@ -84,22 +120,7 @@ def main() -> int:
         for usage_path in USAGE_REPORT_PATHS:
             write_usage_report(usage_path, usage, request_count=len(rows))
 
-        summary = summarize_rows(rows)
-        print()
-        print("=" * 80)
-        print("Phase 5 — output.csv")
-        print("=" * 80)
-        print(f"Wrote {summary['count']} rows to {OUTPUT_PATH}")
-        print(f"Also wrote {ROOT_OUTPUT_PATH}")
-        print(f"affordability_status counts : {summary['status']}")
-        print(f"recommended_payment_method  : {summary['method']}")
-        print("First three rows:")
-        for row in rows[:3]:
-            print(
-                f"  {row['request_id']}: {row['affordability_status']} / "
-                f"{row['recommended_payment_method']} / "
-                f"safe={row['amount_safe_to_pay']} / plan={row['payment_plan']}"
-            )
+        print_run_summary(rows)
         return 0
 
     except FileNotFoundError as error:

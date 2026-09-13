@@ -129,7 +129,7 @@ def generate_predictions(
         rows.append(decision_to_row(decision))
         done = len(rows)
         if progress_every and done % progress_every == 0:
-            print(f"Predicted {done}/{len(requests_df)} requests...")
+            print(f"  {done} / {len(requests_df)}")
 
     return rows
 

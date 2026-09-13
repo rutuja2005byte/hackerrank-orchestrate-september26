@@ -845,7 +845,7 @@ def _make_event_row(**values: Any) -> dict[str, Any]:
     return template
 
 
-def run_simple_tests() -> None:
+def run_simple_tests(quiet: bool = False) -> None:
     """Tiny assertions for the safe-amount and minimum-balance rules."""
     request = {"request_date": "2024-01-01", "requested_amount": 900}
     profile = {
@@ -946,4 +946,5 @@ def run_simple_tests() -> None:
     assert pending_result.amount_safe_to_pay == 800
     assert pending_result.total_confirmed_income == 0
 
-    print("Phase 2 simple tests: all assertions passed.")
+    if not quiet:
+        print("Forecast checks passed.")

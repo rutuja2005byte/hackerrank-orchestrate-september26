@@ -657,7 +657,7 @@ def _empty_forecast(safe: float, requested: float, start: date, minimum: float, 
     )
 
 
-def run_simple_decision_tests() -> None:
+def run_simple_decision_tests(quiet: bool = False) -> None:
     """Assertions for eligibility, wait vs full, and installment month limits."""
     start = date(2024, 1, 1)
     request = {
@@ -763,4 +763,5 @@ def run_simple_decision_tests() -> None:
     assert wait_decision.earliest_date_for_full_payment == "2024-02-15"
     assert wait_decision.payment_plan == "2024-02-15:400"
 
-    print("Phase 3 simple tests: all assertions passed.")
+    if not quiet:
+        print("Plan checks passed.")

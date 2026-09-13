@@ -464,7 +464,7 @@ def extract_message_facts(
     return facts
 
 
-def run_simple_message_tests() -> None:
+def run_simple_message_tests(quiet: bool = False) -> None:
     request_date = date(2025, 8, 5)
     events = pd.DataFrame(
         [
@@ -542,4 +542,5 @@ def run_simple_message_tests() -> None:
     assert by_id["message_test_rent"]["action"] == "amend_amount"
     assert abs(float(by_id["message_test_rent"]["amount"]) - 112.0) < 0.001
     assert by_id["message_test_end"]["action"] == "end_income"
-    print("Message fact tests: all assertions passed.")
+    if not quiet:
+        print("Message checks passed.")
