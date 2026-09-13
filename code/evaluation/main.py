@@ -265,29 +265,23 @@ def check_row(
             )
 
 
-def main() -> int:
+def collect_validation_errors() -> tuple[int, list[str]]:
+    """Return (row_count, errors). Does not print."""
     errors: list[str] = []
-    try:
-        output_df = load_csv(OUTPUT_PATH)
-        requests_df = pd.read_csv(DATASET_DIR / "requests.csv")
-        profiles_df = pd.read_csv(DATASET_DIR / "financial_profiles.csv")
-        events_df = pd.read_csv(DATASET_DIR / "financial_events.csv")
-        options_df = pd.read_csv(DATASET_DIR / "request_payment_options.csv")
-        rates_path = DATASET_DIR / "exchange_rates.csv"
-        rates_df = pd.read_csv(rates_path) if rates_path.exists() else pd.DataFrame()
-        messages_path = DATASET_DIR / "messages.csv"
-        messages_df = pd.read_csv(messages_path) if messages_path.exists() else pd.DataFrame()
-    except FileNotFoundError as error:
-        print(f"EVALUATION FAILED: {error}")
-        return 1
+    output_df = load_csv(OUTPUT_PATH)
+    requests_df = pd.read_csv(DATASET_DIR / "requests.csv")
+    profiles_df = pd.read_csv(DATASET_DIR / "financial_profiles.csv")
+    events_df = pd.read_csv(DATASET_DIR / "financial_events.csv")
+    options_df = pd.read_csv(DATASET_DIR / "request_payment_options.csv")
+    rates_path = DATASET_DIR / "exchange_rates.csv"
+    rates_df = pd.read_csv(rates_path) if rates_path.exists() else pd.DataFrame()
+    messages_path = DATASET_DIR / "messages.csv"
+    messages_df = pd.read_csv(messages_path) if messages_path.exists() else pd.DataFrame()
 
     check_schema(output_df, errors)
     check_ids(output_df, requests_df, errors)
     if errors:
-        print("EVALUATION FAILED")
-        for error in errors:
-            print(f"- {error}")
-        return 1
+        return len(output_df), errors
 
     requests_by_id = {
         str(row["request_id"]): row for _, row in requests_df.iterrows()
@@ -316,6 +310,15 @@ def main() -> int:
             messages_df,
             errors,
         )
+    return len(output_df), errors
+
+
+def main() -> int:
+    try:
+        row_count, errors = collect_validation_errors()
+    except FileNotFoundError as error:
+        print(f"EVALUATION FAILED: {error}")
+        return 1
 
     if errors:
         print(f"EVALUATION FAILED ({len(errors)} issues)")
@@ -326,7 +329,7 @@ def main() -> int:
         return 1
 
     print("EVALUATION PASSED")
-    print(f"Checked {len(output_df)} rows in {OUTPUT_PATH}")
+    print(f"Checked {row_count} rows in {OUTPUT_PATH}")
     print("Validated schema, IDs, allowed values, amount ranges, dates,")
     print("totals, installment matching, partial-payment rules, and 90-day safety.")
     return 0

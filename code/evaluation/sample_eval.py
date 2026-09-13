@@ -104,7 +104,8 @@ def likely_cause(field: str, predicted: str, expected: str) -> str:
     return "field differs from the sample"
 
 
-def evaluate_samples() -> int:
+def score_samples() -> dict:
+    """Compare production predictions with sample_requests.csv labels."""
     samples_path = DATASET_DIR / "sample_requests.csv"
     inputs, expected = load_split_samples(samples_path)
     profiles = pd.read_csv(DATASET_DIR / "financial_profiles.csv")
@@ -147,6 +148,20 @@ def evaluate_samples() -> int:
             exact_rows += 1
 
     total = len(expected)
+    return {
+        "total": total,
+        "exact_rows": exact_rows,
+        "field_hits": field_hits,
+        "mismatches": mismatches,
+    }
+
+
+def evaluate_samples() -> int:
+    result = score_samples()
+    total = result["total"]
+    field_hits = result["field_hits"]
+    mismatches = result["mismatches"]
+    exact_rows = result["exact_rows"]
     print("=" * 80)
     print("Sample ground-truth evaluation")
     print("=" * 80)
